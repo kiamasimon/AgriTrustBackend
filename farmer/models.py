@@ -1,5 +1,6 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import User
+from django.core.validators import MinValueValidator
 from django.db import models
 
 
@@ -84,8 +85,17 @@ class LandToken(models.Model):
 
 
 class CarbonCreditProject(models.Model):
-    farmer = models.ForeignKey(FarmerProfile, on_delete=models.CASCADE)
-    land_parcel = models.ForeignKey(LandParcel, on_delete=models.CASCADE)
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('submitted', 'Submitted'),
+        ('under_review', 'Under Review'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('suspended', 'Suspended'),
+    ]
+
+    farmer = models.ForeignKey('FarmerProfile', on_delete=models.CASCADE)
+    land_parcel = models.ForeignKey('LandParcel', on_delete=models.CASCADE)
     project_name = models.CharField(max_length=200)
     project_description = models.TextField()
     methodology = models.CharField(
@@ -94,10 +104,18 @@ class CarbonCreditProject(models.Model):
             ('agroforestry', 'Agroforestry'),
             ('conservation_ag', 'Conservation Agriculture'),
             ('organic', 'Organic Farming'),
-            ('reforestation', 'Reforestation')
+            ('reforestation', 'Reforestation'),
+            ('biochar', 'Biochar Application'),
+            ('livestock', 'Improved Livestock Management'),
         ]
     )
     start_date = models.DateField()
+    expected_credits_per_year = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(0)],
+        help_text="Estimated carbon credits per year (tons CO2e)"
+    )
     verification_standard = models.CharField(
         max_length=50,
         choices=[
@@ -107,34 +125,71 @@ class CarbonCreditProject(models.Model):
             ('custom', 'Custom Methodology')
         ]
     )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     is_approved = models.BooleanField(default=False)
     approved_date = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        verbose_name = "Carbon Credit Project"
+        verbose_name_plural = "Carbon Credit Projects"
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.project_name} - {self.get_status_display()}"
+
 
 class CarbonCreditIssuance(models.Model):
-    project = models.ForeignKey(CarbonCreditProject, on_delete=models.CASCADE)
+    ISSUANCE_STATUS = [
+        ('pending', 'Pending Verification'),
+        ('issued', 'Issued'),
+        ('rejected', 'Rejected'),
+        ('retired', 'Retired'),
+    ]
+
+    project = models.ForeignKey(CarbonCreditProject, on_delete=models.CASCADE, related_name='issuances')
     issuance_date = models.DateField()
-    amount = models.DecimalField(max_digits=12, decimal_places=2)  # in tons of CO2 equivalent
-    token_id = models.CharField(max_length=50)  # Hedera token ID
-    batch_number = models.CharField(max_length=50)
-    verification_report = models.FileField(upload_to='verification_reports/')
+    amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(0.01)],
+        help_text="Amount in tons of CO2 equivalent"
+    )
+    status = models.CharField(max_length=20, choices=ISSUANCE_STATUS, default='pending')
+    token_id = models.CharField(max_length=50, blank=True, help_text="Hedera token ID")
+    batch_number = models.CharField(max_length=50, unique=True)
+    verification_report = models.FileField(upload_to='verification_reports/%Y/%m/%d/')
     verification_body = models.CharField(max_length=200)
-    transaction_id = models.CharField(max_length=100)  # Hedera transaction ID
+    verification_date = models.DateField()
+    transaction_id = models.CharField(max_length=100, blank=True, help_text="Hedera transaction ID")
     is_retired = models.BooleanField(default=False)
     retired_date = models.DateTimeField(null=True, blank=True)
+    retirement_reason = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Carbon Credit Issuance"
+        verbose_name_plural = "Carbon Credit Issuances"
+        ordering = ['-issuance_date']
+
+    def __str__(self):
+        return f"Issuance #{self.batch_number} - {self.amount} tCO2e"
 
 
 class SensorData(models.Model):
-    project = models.ForeignKey(CarbonCreditProject, on_delete=models.CASCADE)
+    project = models.ForeignKey(CarbonCreditProject, on_delete=models.CASCADE, related_name='sensor_data')
     sensor_type = models.CharField(
         max_length=50,
         choices=[
             ('soil_moisture', 'Soil Moisture'),
             ('temperature', 'Temperature'),
             ('rainfall', 'Rainfall'),
-            ('ndvi', 'NDVI (Vegetation Index)')
+            ('ndvi', 'NDVI (Vegetation Index)'),
+            ('soil_carbon', 'Soil Carbon Content'),
+            ('ph', 'Soil pH'),
         ]
     )
     value = models.DecimalField(max_digits=10, decimal_places=2)
@@ -145,31 +200,118 @@ class SensorData(models.Model):
         choices=[
             ('iot_device', 'IoT Device'),
             ('satellite', 'Satellite'),
-            ('manual', 'Manual Entry')
+            ('manual', 'Manual Entry'),
+            ('drone', 'Drone Survey'),
         ]
     )
     device_id = models.CharField(max_length=100, null=True, blank=True)
     is_verified = models.BooleanField(default=False)
+    verification_notes = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Sensor Data"
+        verbose_name_plural = "Sensor Data"
+        ordering = ['-reading_date']
+
+    def __str__(self):
+        return f"{self.get_sensor_type_display()} - {self.value}{self.unit}"
 
 
-# Sustainable practice records
 class PracticeVerification(models.Model):
-    project = models.ForeignKey(CarbonCreditProject, on_delete=models.CASCADE)
+    VERIFICATION_METHODS = [
+        ('remote', 'Remote Sensing'),
+        ('field_visit', 'Field Visit'),
+        ('farmer_report', 'Farmer Report'),
+        ('community', 'Community Verification'),
+        ('drone', 'Drone Survey'),
+        ('satellite', 'Satellite Imagery'),
+    ]
+
+    VERIFICATION_STATUS = [
+        ('pending', 'Pending Review'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('requires_followup', 'Requires Follow-up'),
+    ]
+
+    project = models.ForeignKey(CarbonCreditProject, on_delete=models.CASCADE, related_name='verifications')
     verification_date = models.DateField()
-    verification_type = models.CharField(
-        max_length=50,
-        choices=[
-            ('remote', 'Remote Sensing'),
-            ('field_visit', 'Field Visit'),
-            ('farmer_report', 'Farmer Report'),
-            ('community', 'Community Verification')
-        ]
-    )
+    verification_type = models.CharField(max_length=50, choices=VERIFICATION_METHODS)
     verified_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL)
+    status = models.CharField(max_length=20, choices=VERIFICATION_STATUS, default='pending')
     findings = models.TextField()
     is_compliant = models.BooleanField()
-    evidence_documents = models.FileField(upload_to='verification_evidence/', null=True, blank=True)
-    photos = models.FileField(upload_to='verification_photos/', null=True, blank=True)
+    compliance_score = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text="Compliance score (0-100)"
+    )
+    notes = models.TextField(null=True, blank=True)
+    next_verification_date = models.DateField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Practice Verification"
+        verbose_name_plural = "Practice Verifications"
+        ordering = ['-verification_date']
+
+    def __str__(self):
+        return f"Verification for {self.project} - {self.get_status_display()}"
+
+
+class VerificationEvidence(models.Model):
+    verification = models.ForeignKey(PracticeVerification, on_delete=models.CASCADE, related_name='evidence')
+    file = models.FileField(upload_to='verification_evidence/%Y/%m/%d/')
+    file_type = models.CharField(
+        max_length=20,
+        choices=[
+            ('photo', 'Photo'),
+            ('video', 'Video'),
+            ('document', 'Document'),
+            ('audio', 'Audio Recording'),
+            ('geojson', 'GeoJSON'),
+        ]
+    )
+    description = models.CharField(max_length=255, blank=True)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Verification Evidence"
+        verbose_name_plural = "Verification Evidence"
+
+    def __str__(self):
+        return f"{self.get_file_type_display()} evidence for {self.verification}"
+
+
+class AuditLog(models.Model):
+    ACTION_CHOICES = [
+        ('create', 'Create'),
+        ('update', 'Update'),
+        ('delete', 'Delete'),
+        ('verify', 'Verify'),
+        ('approve', 'Approve'),
+        ('reject', 'Reject'),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    action = models.CharField(max_length=20, choices=ACTION_CHOICES)
+    model_name = models.CharField(max_length=50)
+    object_id = models.CharField(max_length=50)
+    details = models.JSONField(null=True, blank=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Audit Log"
+        verbose_name_plural = "Audit Logs"
+        ordering = ['-timestamp']
+
+    def __str__(self):
+        return f"{self.user} {self.action} {self.model_name} #{self.object_id}"
 
 
 class TransactionHistory(models.Model):

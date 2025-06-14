@@ -3,14 +3,26 @@ from decimal import Decimal
 
 from hiero_sdk_python import Client, AccountId, PrivateKey, CryptoGetAccountBalanceQuery, Network
 from rest_framework import generics, permissions, status, viewsets
+from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from rest_framework.response import Response
-from .models import FarmerProfile, HederaAccount
-from .serializers import FarmerProfileSerializer, LoginSerializer
+from .models import FarmerProfile, HederaAccount, CarbonCreditProject, CarbonCreditIssuance, PracticeVerification, \
+    VerificationEvidence, SensorData
+from .serializers import FarmerProfileSerializer, LoginSerializer, CarbonCreditProjectSerializer, \
+    PracticeVerificationSerializer, CarbonCreditIssuanceSerializer, VerificationEvidenceSerializer, SensorDataSerializer
 from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.tokens import RefreshToken
 import os
-
+from rest_framework import generics, status
+from rest_framework.response import Response
+from .models import LandParcel, LandToken, VerificationRequest
+from .serializers import (
+    LandParcelSerializer,
+    VerificationRequestSerializer,
+    TokenizationSerializer
+)
+from .land_verification import LandVerificationService
+from .tokenization import LandTokenizationService
 
 User = get_user_model()
 
@@ -142,18 +154,6 @@ class UserProfileView(generics.RetrieveAPIView):
         return self.request.user.farmerprofile
 
 
-from rest_framework import generics, status
-from rest_framework.response import Response
-from .models import LandParcel, LandToken, VerificationRequest
-from .serializers import (
-    LandParcelSerializer,
-    VerificationRequestSerializer,
-    TokenizationSerializer
-)
-from .land_verification import LandVerificationService
-from .tokenization import LandTokenizationService
-
-
 class LandParcelView(viewsets.ModelViewSet):
     serializer_class = LandParcelSerializer
 
@@ -260,3 +260,86 @@ class TokenizeLandAPI(viewsets.ModelViewSet):
             "transaction_id": token.mint_transaction_id,
             "metadata": result['metadata']
         }, status=status.HTTP_201_CREATED)
+
+
+class CarbonCreditProjectViewSet(viewsets.ModelViewSet):
+    queryset = CarbonCreditProject.objects.all()
+    serializer_class = CarbonCreditProjectSerializer
+    # filter_backends = [DjangoFilterBackend]
+    # filterset_class = CarbonCreditProjectFilter
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        # if self.request.user.is_staff:
+        #
+        # return self.queryset.filter(farmer__user=self.request.user)
+        return self.queryset
+
+    @action(detail=True, methods=['post'])
+    def submit_for_approval(self, request, pk=None):
+        project = self.get_object()
+        if project.status != 'draft':
+            return Response(
+                {'error': 'Project already submitted'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        project.status = 'submitted'
+        project.save()
+        return Response({'status': 'submitted for approval'})
+
+    @action(detail=True, methods=['get'])
+    def verifications(self, request, pk=None):
+        project = self.get_object()
+        verifications = project.verifications.all()
+        serializer = PracticeVerificationSerializer(verifications, many=True)
+        return Response(serializer.data)
+
+
+class CarbonCreditIssuanceViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = CarbonCreditIssuance.objects.all()
+    serializer_class = CarbonCreditIssuanceSerializer
+    # filter_backends = [DjangoFilterBackend]
+    # filterset_class = CarbonCreditIssuanceFilter
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        if self.request.user.is_staff:
+            return self.queryset
+        return self.queryset.filter(project__farmer_id=self.request.user.id)
+
+
+class PracticeVerificationViewSet(viewsets.ModelViewSet):
+    queryset = PracticeVerification.objects.all()
+    serializer_class = PracticeVerificationSerializer
+    # filter_backends = [DjangoFilterBackend]
+    # filterset_class = PracticeVerificationFilter
+    permission_classes = [permissions.IsAuthenticated]
+
+    def perform_create(self, serializer):
+        serializer.save(verified_by=self.request.user)
+
+
+class VerificationEvidenceViewSet(viewsets.ModelViewSet):
+    queryset = VerificationEvidence.objects.all()
+    serializer_class = VerificationEvidenceSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def perform_create(self, serializer):
+        verification_id = self.request.data.get('verification')
+        verification = PracticeVerification.objects.get(pk=verification_id)
+        if not (self.request.user.is_staff or verification.project.farmer.user == self.request.user):
+            raise PermissionDenied("You don't have permission to add evidence to this verification")
+        serializer.save()
+
+
+class SensorDataViewSet(viewsets.ModelViewSet):
+    queryset = SensorData.objects.all()
+    serializer_class = SensorDataSerializer
+    # filter_backends = [DjangoFilterBackend]
+    # filterset_class = SensorDataFilter
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        if self.request.user.is_staff:
+            return self.queryset
+        return self.queryset.filter(project__farmer__user=self.request.user)

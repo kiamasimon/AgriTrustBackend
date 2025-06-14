@@ -6,7 +6,8 @@ from django.contrib.auth.hashers import make_password
 from hiero_sdk_python import Client, AccountId, PrivateKey, Network, AccountCreateTransaction, Hbar, ResponseCode
 from rest_framework import serializers
 from django.contrib.auth.models import User
-from .models import FarmerProfile, HederaAccount, LandParcel, VerificationRequest
+from .models import FarmerProfile, HederaAccount, LandParcel, VerificationRequest, CarbonCreditProject, \
+    CarbonCreditIssuance, SensorData, VerificationEvidence, PracticeVerification
 from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator
 import os
@@ -150,3 +151,70 @@ class TokenizationSerializer(serializers.Serializer):
     land_parcel = serializers.PrimaryKeyRelatedField(
         queryset=LandParcel.objects.filter(verification_status='verified')
     )
+
+
+class CarbonCreditProjectSerializer(serializers.ModelSerializer):
+    farmer = FarmerProfileSerializer(read_only=True)
+    land_parcel = LandParcelSerializer(read_only=True)
+    land_parcel_id = serializers.PrimaryKeyRelatedField(
+        queryset=LandParcel.objects.all(),
+        source='land_parcel',
+        write_only=True
+    )
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    methodology_display = serializers.CharField(source='get_methodology_display', read_only=True)
+
+    class Meta:
+        model = CarbonCreditProject
+        fields = '__all__'
+        read_only_fields = ['created_at', 'updated_at', 'farmer', 'is_approved', 'approved_date']
+
+
+class CarbonCreditIssuanceSerializer(serializers.ModelSerializer):
+    project = CarbonCreditProjectSerializer(read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = CarbonCreditIssuance
+        fields = '__all__'
+        read_only_fields = ['created_at', 'updated_at', 'transaction_id', 'token_id']
+
+
+class SensorDataSerializer(serializers.ModelSerializer):
+    project = CarbonCreditProjectSerializer(read_only=True)
+    sensor_type_display = serializers.CharField(source='get_sensor_type_display', read_only=True)
+    source_display = serializers.CharField(source='get_source_display', read_only=True)
+
+    class Meta:
+        model = SensorData
+        fields = '__all__'
+        read_only_fields = ['created_at', 'is_verified']
+
+
+class VerificationEvidenceSerializer(serializers.ModelSerializer):
+    file_type_display = serializers.CharField(source='get_file_type_display', read_only=True)
+    file_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = VerificationEvidence
+        fields = '__all__'
+        read_only_fields = ['timestamp']
+
+    def get_file_url(self, obj):
+        request = self.context.get('request')
+        if obj.file and request:
+            return request.build_absolute_uri(obj.file.url)
+        return None
+
+
+class PracticeVerificationSerializer(serializers.ModelSerializer):
+    project = CarbonCreditProjectSerializer(read_only=True)
+    verified_by = UserSerializer(read_only=True)
+    verification_type_display = serializers.CharField(source='get_verification_type_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    evidence = VerificationEvidenceSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = PracticeVerification
+        fields = '__all__'
+        read_only_fields = ['created_at', 'updated_at', 'verified_by']
