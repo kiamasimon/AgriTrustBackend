@@ -101,3 +101,5 @@ celerybeat-schedule
 # system files
 .DS_Store
 Thumbs.db
+
+kyc_documents
